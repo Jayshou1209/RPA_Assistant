@@ -14,6 +14,7 @@ from scraper import DataScraper
 from dispatcher import Dispatcher
 import config
 import logging
+import re
 
 # 配置日志
 logging.basicConfig(
@@ -38,6 +39,8 @@ class RPAAutomationGUI:
         # 初始化变量
         self.api_client = None
         self.scraper = None
+        self.enhanced_scraper = None
+        self.real_scraper = None
         self.dispatcher = None
         self.token_var = tk.StringVar(value=config.BEARER_TOKEN)
         self.status_var = tk.StringVar(value="就绪")
@@ -673,23 +676,23 @@ class RPAAutomationGUI:
                 self.log(f"开始生成 {date} 的账单", "info")
                 self.log("=" * 60)
                 
-                # 获取finished和no_show状态的订单
-                self.log("\n1️⃣ 获取已完成和未到达订单...", "info")
+                # 获取finished、no_show和driver_canceled状态的订单
+                self.log("\n1️⃣ 获取已完成、未到达和司机取消订单...", "info")
                 rides = self.real_scraper.get_all_rides(
                     date=date, 
                     per_page=500, 
-                    statuses='finished,no_show'
+                    statuses='finished,no_show,driver_canceled'
                 )
                 self.log(f"✓ 获取到 {len(rides)} 条订单", "success")
                 
                 if len(rides) == 0:
                     self.log(f"\n⚠️ {date} 没有符合条件的订单", "warning")
-                    messagebox.showwarning("提示", f"{date} 没有找到finished或no_show状态的订单")
+                    messagebox.showwarning("提示", f"{date} 没有找到finished、no_show或driver_canceled状态的订单")
                     self.set_status("就绪")
                     return
                 
-                # 获取订单详细信息（包含价格）
-                self.log("\n2️⃣ 获取订单详细信息（价格）...", "info")
+                # 获取订单详细信息（包含价格和Cash信息）
+                self.log("\n2️⃣ 获取订单详细信息（价格、Cash、Toll）...", "info")
                 detailed_rides = []
                 for idx, ride in enumerate(rides, 1):
                     try:
@@ -697,9 +700,68 @@ class RPAAutomationGUI:
                         detail = self.api_client.get(f'/rides/{ride_id}')
                         ride_detail = detail.get('ride', {})
                         
-                        # 合并基本信息和详细信息
-                        ride['driver_net'] = ride_detail.get('driver_net', 0)
-                        ride['vendor_amount'] = ride_detail.get('vendor_amount', 0)
+                        # 提取价格信息
+                        vendor_amount = float(ride_detail.get('vendor_amount', 0) or 0)
+                        driver_net = float(ride_detail.get('driver_net', 0) or 0)
+                        
+                        # 从events中提取原始订单价格
+                        events = ride_detail.get('events', [])
+                        original_price = 0
+                        for event in events:
+                            body = event.get('body', '')
+                            match = re.search(r'reserved.*for\s+\$([0-9]+\.?[0-9]*)', body, re.IGNORECASE)
+                            if match:
+                                original_price = float(match.group(1))
+                                break
+                        
+                        # 提取Co Pay信息
+                        notes = ride_detail.get('notes', [])
+                        co_pay = 0
+                        
+                        for note in notes:
+                            label = note.get('label', '')
+                            description = note.get('description', '').lower()
+                            icon = note.get('icon', '')
+                            
+                            # 查找Co Pay金额
+                            # 优先：检查icon='private'的notes（如截图红色圈所示）
+                            # 其次：检查description中含'collect'或'cash'的notes
+                            match = re.search(r'\$([0-9]+\.?[0-9]*)', label)
+                            if match:
+                                if icon == 'private' or 'collect' in description or 'cash' in description:
+                                    co_pay = float(match.group(1))
+                                    break
+                        
+                        # 检查订单状态
+                        order_status = ride_detail.get('status', '')
+                        
+                        # no_show和driver_canceled订单特殊处理：固定$5
+                        if order_status in ['no_show', 'driver_canceled']:
+                            order_price = 5.0
+                            co_pay = 0
+                            toll_fee = 0
+                            original_price = 5.0
+                        else:
+                            # finished订单的正常计算
+                            if original_price == 0:
+                                # 没有events说明vendor_amount就是最终价格，无TOLL信息
+                                order_price = round(vendor_amount - co_pay, 2)
+                                toll_fee = 0
+                                original_price = vendor_amount
+                            else:
+                                # 有events说明有原始价格，可以计算TOLL
+                                # 订单价格 = 原始价格 - co_pay
+                                # TOLL = vendor_amount - 订单价格
+                                order_price = round(original_price - co_pay, 2)
+                                toll_fee = round(vendor_amount - order_price, 2)
+                        
+                        # 合并所有信息
+                        ride['driver_net'] = driver_net
+                        ride['vendor_amount'] = vendor_amount
+                        ride['original_price'] = original_price
+                        ride['co_pay'] = co_pay
+                        ride['order_price'] = order_price
+                        ride['toll_fee'] = toll_fee
                         ride['distance'] = ride_detail.get('distance', 0)
                         ride['duration'] = ride_detail.get('duration', 0)
                         detailed_rides.append(ride)
@@ -708,6 +770,13 @@ class RPAAutomationGUI:
                             self.log(f"  已处理 {idx}/{len(rides)} 条订单...", "info")
                     except Exception as e:
                         self.log(f"  ⚠️ 获取订单 {ride.get('id')} 详情失败: {e}", "warning")
+                        # 即使失败也添加基本信息
+                        ride['driver_net'] = 0
+                        ride['vendor_amount'] = 0
+                        ride['original_price'] = 0
+                        ride['co_pay'] = 0
+                        ride['order_price'] = 0
+                        ride['toll_fee'] = 0
                         detailed_rides.append(ride)
                 
                 self.log(f"✓ 已获取 {len(detailed_rides)} 条订单详情", "success")
@@ -748,30 +817,15 @@ class RPAAutomationGUI:
                 driver_list.sort(key=lambda x: x[0])  # 按名字排序
                 
                 for driver_name, driver_id, orders in driver_list:
-                    # 计算该司机的总收入
-                    total_earnings = sum(float(order.get('driver_net', 0) or 0) for order in orders)
-                    
-                    # 司机标题行
-                    all_rows.append({
-                        '司机姓名': driver_name,
-                        '订单数': len(orders),
-                        '总收入': f"${total_earnings:.2f}",
-                        '订单ID': '',
-                        '接客时间': '',
-                        '接客地点': '',
-                        '送达地点': '',
-                        '乘客姓名': '',
-                        '价格': '',
-                        '里程': '',
-                        '状态': ''
-                    })
-                    
-                    # 该司机的所有订单
+                    # 该司机的所有订单（先添加订单）
                     for ride in orders:
-                        driver_net = float(ride.get('driver_net', 0) or 0)
+                        co_pay = float(ride.get('co_pay', 0) or 0)
+                        order_price = float(ride.get('order_price', 0) or 0)
+                        toll_fee = float(ride.get('toll_fee', 0) or 0)
                         distance = float(ride.get('distance', 0) or 0)
+                        
                         all_rows.append({
-                            '司机姓名': driver_name,  # 每行都显示司机名字
+                            '司机姓名': driver_name,
                             '订单数': '',
                             '总收入': '',
                             '订单ID': ride.get('id', ''),
@@ -779,25 +833,46 @@ class RPAAutomationGUI:
                             '接客地点': ride.get('start_address', ''),
                             '送达地点': ride.get('destination_address', ''),
                             '乘客姓名': f"{ride.get('first_name', '')} {ride.get('last_name', '')}".strip(),
-                            '价格': f"${driver_net:.2f}" if driver_net > 0 else '',
+                            'Co Pay': co_pay,
+                            '订单价格': order_price,
+                            'TOLL': toll_fee,
                             '里程': f"{distance:.1f} mi" if distance > 0 else '',
                             '状态': ride.get('status', '')
                         })
                     
-                    # 空行分隔
+                    # 司机汇总行（在该司机所有订单下方，使用Excel公式）
                     all_rows.append({
-                        '司机姓名': '',
-                        '订单数': '',
-                        '总收入': '',
+                        '司机姓名': driver_name,
+                        '订单数': len(orders),
+                        '总收入': 'FORMULA',  # 占位符，后续填充Excel公式
                         '订单ID': '',
                         '接客时间': '',
                         '接客地点': '',
                         '送达地点': '',
                         '乘客姓名': '',
-                        '价格': '',
+                        'Co Pay': 'FORMULA',
+                        '订单价格': 'FORMULA',
+                        'TOLL': 'FORMULA',
                         '里程': '',
                         '状态': ''
                     })
+                
+                # 添加总计行
+                all_rows.append({
+                    '司机姓名': '总计',
+                    '订单数': len(detailed_rides),
+                    '总收入': 'FORMULA_TOTAL',
+                    '订单ID': '',
+                    '接客时间': '',
+                    '接客地点': '',
+                    '送达地点': '',
+                    '乘客姓名': '',
+                    'Co Pay': 'FORMULA_TOTAL',
+                    '订单价格': 'FORMULA_TOTAL',
+                    'TOLL': 'FORMULA_TOTAL',
+                    '里程': '',
+                    '状态': ''
+                })
                 
                 # 保存到Excel
                 df = pd.DataFrame(all_rows)
@@ -817,9 +892,11 @@ class RPAAutomationGUI:
                 ws.column_dimensions['F'].width = 45  # 接客地点
                 ws.column_dimensions['G'].width = 45  # 送达地点
                 ws.column_dimensions['H'].width = 20  # 乘客姓名
-                ws.column_dimensions['I'].width = 12  # 价格
-                ws.column_dimensions['J'].width = 12  # 里程
-                ws.column_dimensions['K'].width = 12  # 状态
+                ws.column_dimensions['I'].width = 12  # Co Pay
+                ws.column_dimensions['J'].width = 15  # 订单价格
+                ws.column_dimensions['K'].width = 12  # TOLL
+                ws.column_dimensions['L'].width = 12  # 里程
+                ws.column_dimensions['M'].width = 12  # 状态
                 
                 # 样式定义
                 header_fill = PatternFill(start_color='366092', end_color='366092', fill_type='solid')
@@ -841,19 +918,93 @@ class RPAAutomationGUI:
                     cell.alignment = center_align
                     cell.border = border
                 
-                # 格式化数据行
+                # 格式化数据行、添加公式和货币格式
+                from openpyxl.styles import numbers
+                
+                # 记录每个司机的订单范围，用于填充汇总公式
+                driver_summary_rows = {}  # {row_number: [start_row, end_row]}
+                current_driver = None
+                driver_start_row = None
+                last_driver_name = None
+                
                 for row_idx, row in enumerate(ws.iter_rows(min_row=2), start=2):
-                    # 检查是否是司机标题行（有司机姓名且有订单数但没有订单ID）
-                    if row[0].value and row[1].value and not row[3].value:  # 司机姓名有值，订单数有值，订单ID无值（订单ID在第4列）
+                    driver_name = row[0].value  # A列：司机姓名
+                    order_count = row[1].value  # B列：订单数
+                    order_id = row[3].value     # D列：订单ID
+                    
+                    # 检查是否是订单行（有订单ID）
+                    if order_id:
+                        # 如果是新司机的第一个订单，记录起始行
+                        if driver_name != last_driver_name:
+                            driver_start_row = row_idx
+                            last_driver_name = driver_name
+                        
+                        # 订单行样式
+                        for cell in row:
+                            cell.alignment = Alignment(vertical='center')
+                            cell.border = border
+                        
+                        # 设置货币格式
+                        if isinstance(row[8].value, (int, float)):  # Co Pay
+                            row[8].number_format = '$#,##0.00'
+                        if isinstance(row[9].value, (int, float)):  # 订单价格
+                            row[9].number_format = '$#,##0.00'
+                        if isinstance(row[10].value, (int, float)):  # TOLL
+                            row[10].number_format = '$#,##0.00'
+                    
+                    # 检查是否是司机汇总行（有司机姓名、有订单数、没有订单ID）
+                    elif driver_name and order_count and not order_id and driver_name != '总计':
+                        # 这是司机汇总行（在订单下方）
+                        driver_summary_rows[row_idx] = [driver_start_row, row_idx - 1]
+                        
+                        # 应用汇总行样式
                         for cell in row:
                             cell.fill = driver_fill
                             cell.font = driver_font
                             cell.alignment = center_align
                             cell.border = border
-                    else:
+                    
+                    # 检查是否是总计行
+                    elif driver_name == '总计':
+                        # 应用总计行样式
+                        total_fill = PatternFill(start_color='4472C4', end_color='4472C4', fill_type='solid')
+                        total_font = Font(bold=True, color='FFFFFF', size=12)
                         for cell in row:
-                            cell.alignment = Alignment(vertical='center')
+                            cell.fill = total_fill
+                            cell.font = total_font
+                            cell.alignment = center_align
                             cell.border = border
+                        
+                        # 填充总计公式（对所有订单行求和，排除司机汇总行）
+                        # C列：总收入 = Co Pay + 订单价格 + TOLL
+                        row[2].value = f'=SUM(I{row_idx}:K{row_idx})'
+                        row[2].number_format = '$#,##0.00'
+                        # I列：Co Pay总计
+                        row[8].value = f'=SUMIF($D$2:$D${row_idx-1},"<>",I$2:I${row_idx-1})'
+                        row[8].number_format = '$#,##0.00'
+                        # J列：订单价格总计
+                        row[9].value = f'=SUMIF($D$2:$D${row_idx-1},"<>",J$2:J${row_idx-1})'
+                        row[9].number_format = '$#,##0.00'
+                        # K列：TOLL总计
+                        row[10].value = f'=SUMIF($D$2:$D${row_idx-1},"<>",K$2:K${row_idx-1})'
+                        row[10].number_format = '$#,##0.00'
+                
+                # 填充司机汇总行的公式
+                for summary_row, range_info in driver_summary_rows.items():
+                    if isinstance(range_info, list):
+                        start_row, end_row = range_info
+                        # C列：总收入 = SUM(Co Pay + 订单价格 + TOLL)
+                        ws.cell(summary_row, 3).value = f'=SUM(I{summary_row}:K{summary_row})'
+                        ws.cell(summary_row, 3).number_format = '$#,##0.00'
+                        # I列：Co Pay汇总
+                        ws.cell(summary_row, 9).value = f'=SUM(I{start_row}:I{end_row})'
+                        ws.cell(summary_row, 9).number_format = '$#,##0.00'
+                        # J列：订单价格汇总
+                        ws.cell(summary_row, 10).value = f'=SUM(J{start_row}:J{end_row})'
+                        ws.cell(summary_row, 10).number_format = '$#,##0.00'
+                        # K列：TOLL汇总
+                        ws.cell(summary_row, 11).value = f'=SUM(K{start_row}:K{end_row})'
+                        ws.cell(summary_row, 11).number_format = '$#,##0.00'
                 
                 wb.save(excel_file)
                 self.log(f"✓ Excel已保存: {excel_file}", "success")

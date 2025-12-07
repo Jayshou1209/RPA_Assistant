@@ -8,7 +8,7 @@ echo.
 cd /d "%~dp0"
 
 echo [1/2] 检查Python环境...
-python --version
+py --version
 if errorlevel 1 (
     echo 错误: 未找到Python，请先安装Python 3.7+
     pause
@@ -17,7 +17,7 @@ if errorlevel 1 (
 
 echo.
 echo [2/2] 安装依赖包...
-pip install -r requirements.txt
+py -m pip install -r requirements.txt
 
 if errorlevel 1 (
     echo.

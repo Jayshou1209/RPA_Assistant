@@ -8,7 +8,7 @@ echo.
 cd /d "%~dp0"
 
 echo [检查Python环境...]
-python --version >nul 2>&1
+py --version >nul 2>&1
 if errorlevel 1 (
     echo 错误: 未找到Python，请先安装Python 3.7+
     pause
@@ -18,7 +18,7 @@ if errorlevel 1 (
 echo [启动GUI程序...]
 echo.
 
-python gui.py
+py gui.py
 
 if errorlevel 1 (
     echo.
