@@ -36,19 +36,18 @@ class Dispatcher:
         """
         try:
             logger.info(f"派工 (Assign): 订单 {ride_id} -> 司机 {driver_id}")
-            
-            # 调用assign API
+            # 使用 fleet API 端点
             data = {
-                'driver_id': driver_id
+                'entity_id': driver_id,
+                'entity_type': 'driver',
+                'status': 'assign_driver'
             }
-            
-            response = self.api.post(f'/rides/{ride_id}/assign', json_data=data)
+            response = self.api.post(f'/fleet/rides/{ride_id}', json_data=data)
             logger.info(f"派工成功: {response}")
-            return response
-            
+            return {'success': True, 'data': response}
         except Exception as e:
             logger.error(f"派工失败: {e}")
-            raise
+            return {'success': False, 'error': str(e)}
     
     # 保留旧的dispatch_order方法作为别名
     def dispatch_order(
@@ -67,7 +66,7 @@ class Dispatcher:
         退工 (Revive) - 取消司机分配，默认原因为driver cancel
         
         根据Myle系统Network面板，正确的API格式是:
-        POST /rides/{id}
+        POST /fleet/rides/{id}
         Body: {"status": "revive", "reason": "..."}
         
         Args:
@@ -80,13 +79,13 @@ class Dispatcher:
         try:
             logger.info(f"退工 (Revive): 订单 {ride_id}, 原因: {reason}")
             
-            # 必须发送status字段！
+            # 必须发送status字段！使用 fleet API
             data = {
                 'status': 'revive',
                 'reason': reason
             }
             
-            response = self.api.post(f'/rides/{ride_id}', json_data=data)
+            response = self.api.post(f'/fleet/rides/{ride_id}', json_data=data)
             logger.info(f"退工成功: {response}")
             return response
             
@@ -110,7 +109,7 @@ class Dispatcher:
         转派 (Switch) - 更换订单的司机
         
         根据Myle系统Network面板，正确的API格式是:
-        POST /rides/{id}
+        POST /fleet/rides/{id}
         Body: {"entity_id": driver_id, "entity_type": "driver", "status": "switch_driver"}
         
         Args:
@@ -123,14 +122,14 @@ class Dispatcher:
         try:
             logger.info(f"转派 (Switch): 订单 {ride_id} -> 新司机 {new_driver_id}")
             
-            # 使用正确的字段格式
+            # 使用正确的字段格式，使用 fleet API
             data = {
                 'entity_id': new_driver_id,
                 'entity_type': 'driver',
                 'status': 'switch_driver'
             }
             
-            response = self.api.post(f'/rides/{ride_id}', json_data=data)
+            response = self.api.post(f'/fleet/rides/{ride_id}', json_data=data)
             logger.info(f"转派成功: {response}")
             return response
             
@@ -170,20 +169,26 @@ class Dispatcher:
         
         for i, item in enumerate(dispatch_list, 1):
             logger.info(f"处理第 {i}/{len(dispatch_list)} 个订单")
-            
-            result = self.dispatch_order(
-                driver_id=item.get('driver_id'),
-                order_id=item.get('order_id'),
-                date=item.get('date'),
-                time_slot=item.get('time_slot'),
-                **{k: v for k, v in item.items() if k not in ['driver_id', 'order_id', 'date', 'time_slot']}
-            )
-            
-            results.append({
-                'order_id': item.get('order_id'),
-                'driver_id': item.get('driver_id'),
-                'result': result
-            })
+            try:
+                result = self.dispatch_order(
+                    driver_id=item.get('driver_id'),
+                    order_id=item.get('order_id'),
+                    date=item.get('date'),
+                    time_slot=item.get('time_slot'),
+                    **{k: v for k, v in item.items() if k not in ['driver_id', 'order_id', 'date', 'time_slot']}
+                )
+                results.append({
+                    'order_id': item.get('order_id'),
+                    'driver_id': item.get('driver_id'),
+                    'result': result
+                })
+            except Exception as e:
+                logger.error(f"订单 {item.get('order_id')} 派工异常: {e}")
+                results.append({
+                    'order_id': item.get('order_id'),
+                    'driver_id': item.get('driver_id'),
+                    'result': {'success': False, 'error': str(e)}
+                })
         
         success_count = sum(1 for r in results if r['result'].get('success'))
         logger.info(f"批量派工完成 - 成功: {success_count}/{len(dispatch_list)}")

@@ -1,4 +1,4 @@
-"""
+﻿"""
 增强版数据爬取器 - 爬取司机详细资料
 支持获取每个司机的完整信息并导出Excel
 """
@@ -41,7 +41,7 @@ class EnhancedScraper:
             司机详细信息字典
         """
         try:
-            endpoint = f"/drivers/{driver_id}"
+            endpoint = f"/fleet/drivers/{driver_id}"
             logger.info(f"获取司机 {driver_id} 的详细信息...")
             response = self.api.get(endpoint)
             
@@ -70,7 +70,7 @@ class EnhancedScraper:
         
         # 1. 获取司机列表
         try:
-            response = self.api.get("/drivers")
+            response = self.api.get("/fleet/drivers")
             drivers_list = response.get('data', [])
             logger.info(f"获取到 {len(drivers_list)} 位司机")
             

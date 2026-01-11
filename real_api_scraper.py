@@ -1,4 +1,4 @@
-"""
+﻿"""
 真实API爬虫 - 使用正确的api-admin.myle.tech端点
 支持分页获取所有数据，并导出到Excel
 """
@@ -61,7 +61,7 @@ class RealAPIScraper:
                 }
                 
                 logger.info(f"正在获取第 {page} 页数据...")
-                response = self.api.get('/drivers', params=params)
+                response = self.api.get('/fleet/drivers', params=params)
                 
                 # 检查响应格式 - API返回格式: {"drivers": {"data": [...], "current_page": 1, ...}}
                 if isinstance(response, dict):
@@ -157,7 +157,7 @@ class RealAPIScraper:
                 }
                 
                 logger.info(f"正在获取第 {page} 页路线数据...")
-                response = self.api.get('/routes', params=params)
+                response = self.api.get('/fleet/routes', params=params)
                 
                 # API返回格式: {"routes": {"data": [...], ...}}
                 if isinstance(response, dict):
@@ -245,7 +245,7 @@ class RealAPIScraper:
                 }
                 
                 logger.info(f"正在获取第 {page} 页订单数据...")
-                response = self.api.get('/rides', params=params)
+                response = self.api.get('/fleet/rides', params=params)
                 
                 # API返回格式: {"rides": {"data": [...], ...}}
                 if isinstance(response, dict):
@@ -306,12 +306,109 @@ class RealAPIScraper:
             司机详细信息
         """
         try:
-            endpoint = f"/drivers/{driver_id}"
+            endpoint = f"/fleet/drivers/{driver_id}"
             response = self.api.get(endpoint)
             return response.get('data', response)
         except Exception as e:
             logger.error(f"获取司机 {driver_id} 详细信息失败: {e}")
             return None
+    
+    def get_vehicle_detail(self, vehicle_id: int) -> Dict[str, Any]:
+        """
+        获取单个车辆的详细信息
+        
+        Args:
+            vehicle_id: 车辆ID
+            
+        Returns:
+            车辆详细信息
+        """
+        try:
+            endpoint = f"/fleet/cars/{vehicle_id}"
+            response = self.api.get(endpoint)
+            # API返回格式: {"car": {...}}
+            return response.get('car', response.get('data', response))
+        except Exception as e:
+            logger.error(f"获取车辆 {vehicle_id} 详细信息失败: {e}")
+            return None
+    
+    def get_all_drivers_with_full_details(self, per_page: int = 100, progress_callback=None) -> List[Dict[str, Any]]:
+        """
+        获取所有司机数据及其完整的详细信息（包括证件、车辆等）
+        
+        Args:
+            per_page: 每页数量
+            progress_callback: 进度回调函数
+            
+        Returns:
+            包含完整详细信息的司机列表
+        """
+        logger.info("开始爬取司机完整详细信息...")
+        
+        # 第一步：获取所有司机基本信息
+        all_drivers = self.get_all_drivers(per_page=per_page, progress_callback=progress_callback)
+        logger.info(f"✓ 获取到 {len(all_drivers)} 位司机的基本信息")
+        
+        if not all_drivers:
+            return []
+        
+        # 第二步：逐个获取司机详细信息
+        detailed_drivers = []
+        total = len(all_drivers)
+        
+        logger.info(f"开始获取每位司机的详细信息（包括证件、车辆等）...")
+        
+        for idx, driver in enumerate(all_drivers, 1):
+            try:
+                driver_id = driver.get('id')
+                if not driver_id:
+                    detailed_drivers.append(driver)
+                    continue
+                
+                # 获取司机详细信息（包含证件信息）
+                driver_detail = self.get_driver_detail(driver_id)
+                
+                if driver_detail:
+                    # 合并基本信息和详细信息
+                    merged_driver = {**driver, **driver_detail}
+                    
+                    # 获取车辆详细信息 - API返回的是'cars'而不是'vehicles'
+                    cars = merged_driver.get('cars', []) or merged_driver.get('vehicles', [])
+                    if cars and isinstance(cars, list) and len(cars) > 0:
+                        car = cars[0]
+                        vehicle_id = car.get('id') if isinstance(car, dict) else None
+                        
+                        if vehicle_id:
+                            logger.info(f"  获取车辆 {vehicle_id} 的详细信息...")
+                            vehicle_detail = self.get_vehicle_detail(vehicle_id)
+                            if vehicle_detail:
+                                # 将车辆详细信息添加到司机信息中
+                                merged_driver['vehicle_detail'] = vehicle_detail
+                                logger.info(f"  ✓ 车辆信息已获取")
+                            else:
+                                logger.warning(f"  ✗ 车辆 {vehicle_id} 详情获取失败")
+                    else:
+                        logger.warning(f"  司机 {driver_id} 没有关联的车辆")
+                    
+                    detailed_drivers.append(merged_driver)
+                else:
+                    detailed_drivers.append(driver)
+                
+                # 每处理10条数据记录一次日志
+                if idx % 10 == 0 or idx == total:
+                    logger.info(f"进度: {idx}/{total} ({idx*100//total}%)")
+                    if progress_callback:
+                        progress_callback(idx, total, f"获取详情 {idx}/{total}")
+                
+                # 避免请求过快
+                time.sleep(0.3)
+                
+            except Exception as e:
+                logger.error(f"处理司机 {driver.get('id')} 时出错: {e}")
+                detailed_drivers.append(driver)
+        
+        logger.info(f"✓ 完成！成功获取 {len(detailed_drivers)} 位司机的完整详细信息")
+        return detailed_drivers
     
     def scrape_all_data(self, get_driver_details: bool = False, date: str = None,
                         progress_callback=None) -> Dict[str, Any]:
@@ -456,7 +553,7 @@ if __name__ == "__main__":
             'sort_by': 'drivers.id',
             'sort_by_type': 'true'
         }
-        response = scraper.api.get('/drivers', params=params)
+        response = scraper.api.get('/fleet/drivers', params=params)
         print(f"\n第 {page} 页响应:")
         print(f"响应类型: {type(response)}")
         

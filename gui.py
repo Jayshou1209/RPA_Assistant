@@ -203,8 +203,43 @@ class RPAAutomationGUI:
             self.real_scraper = RealAPIScraper(self.api_client)
             self.dispatcher = Dispatcher(self.api_client)
             self.log("✓ API客户端初始化成功", "success")
+            self.log("💡 提示: 请点击'测试连接'按钮验证Token是否有效", "info")
+            self._check_token_validity()
         except Exception as e:
             self.log(f"✗ 初始化失败: {e}", "error")
+    
+    def _check_token_validity(self):
+        """检查Token有效性（后台运行）"""
+        def check():
+            try:
+                import jwt
+                from datetime import datetime
+                
+                # 解析 Token（不验证签名）
+                token_str = self.token_var.get().replace("Bearer ", "").strip()
+                if not token_str:
+                    return
+                    
+                decoded = jwt.decode(token_str, options={"verify_signature": False})
+                
+                # 检查过期时间
+                if 'exp' in decoded:
+                    exp_time = datetime.fromtimestamp(decoded['exp'])
+                    now = datetime.now()
+                    
+                    if now > exp_time:
+                        self.log("⚠️ 警告: Token已过期，请更新Token", "warning")
+                    else:
+                        time_left = exp_time - now
+                        hours = int(time_left.total_seconds() / 3600)
+                        minutes = int((time_left.total_seconds() % 3600) / 60)
+                        self.log(f"ℹ️ Token有效期剩余: {hours}小时{minutes}分钟", "info")
+            except ImportError:
+                pass  # JWT库未安装，跳过检查
+            except Exception:
+                pass  # Token格式错误或其他问题，跳过检查
+        
+        threading.Thread(target=check, daemon=True).start()
     
     def save_token(self):
         """保存Token到配置文件"""
@@ -266,12 +301,15 @@ class RPAAutomationGUI:
         def test():
             self.set_status("测试连接中...")
             try:
-                if self.api_client.verify_connection():
+                success, message = self.api_client.verify_connection()
+                if success:
                     self.log("✓ 连接测试成功！", "success")
-                    messagebox.showinfo("成功", "连接测试成功！")
+                    self.log(f"  {message}", "info")
+                    messagebox.showinfo("成功", "连接测试成功！API服务正常")
                 else:
                     self.log("✗ 连接测试失败", "error")
-                    messagebox.showerror("失败", "连接测试失败，请检查Token")
+                    self.log(f"  错误: {message}", "error")
+                    messagebox.showerror("连接失败", f"{message}")
             except Exception as e:
                 self.log(f"✗ 连接错误: {e}", "error")
                 messagebox.showerror("错误", f"连接错误: {e}")
@@ -495,7 +533,7 @@ class RPAAutomationGUI:
                 drivers_info = {}
                 for driver_id in driver_ids:
                     try:
-                        driver_data = self.api_client.get(f'/drivers/{driver_id}')
+                        driver_data = self.api_client.get(f'/fleet/drivers/{driver_id}')
                         driver = driver_data.get('driver', {})
                         first_name = driver.get('first_name', '')
                         last_name = driver.get('last_name', '')
@@ -697,7 +735,7 @@ class RPAAutomationGUI:
                 for idx, ride in enumerate(rides, 1):
                     try:
                         ride_id = ride.get('id')
-                        detail = self.api_client.get(f'/rides/{ride_id}')
+                        detail = self.api_client.get(f'/fleet/rides/{ride_id}')
                         ride_detail = detail.get('ride', {})
                         
                         # 提取价格信息
@@ -841,9 +879,12 @@ class RPAAutomationGUI:
                         })
                     
                     # 司机汇总行（在该司机所有订单下方，使用Excel公式）
+                    # 只统计finished状态的订单数
+                    finished_count = sum(1 for order in orders if order.get('status') == 'finished')
+                    
                     all_rows.append({
                         '司机姓名': driver_name,
-                        '订单数': len(orders),
+                        '订单数': finished_count,
                         '总收入': 'FORMULA',  # 占位符，后续填充Excel公式
                         '订单ID': '',
                         '接客时间': '',
@@ -857,10 +898,12 @@ class RPAAutomationGUI:
                         '状态': ''
                     })
                 
-                # 添加总计行
+                # 添加总计行（只统计finished订单）
+                total_finished_count = sum(1 for ride in detailed_rides if ride.get('status') == 'finished')
+                
                 all_rows.append({
                     '司机姓名': '总计',
-                    '订单数': len(detailed_rides),
+                    '订单数': total_finished_count,
                     '总收入': 'FORMULA_TOTAL',
                     '订单ID': '',
                     '接客时间': '',
@@ -1105,7 +1148,7 @@ class RPAAutomationGUI:
                 for idx, ride in enumerate(rides, 1):
                     try:
                         ride_id = ride.get('id')
-                        detail = self.api_client.get(f'/rides/{ride_id}')
+                        detail = self.api_client.get(f'/fleet/rides/{ride_id}')
                         ride_detail = detail.get('ride', {})
                         
                         # 合并基本信息和详细信息
